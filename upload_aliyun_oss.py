@@ -11,7 +11,6 @@ class UploadAliyunOSS:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
                 "access_key_id": ("STRING", {"default": "", "multiline": False}),
                 "access_key_secret": ("STRING", {"default": "", "multiline": False}),
                 "endpoint": (
@@ -28,6 +27,8 @@ class UploadAliyunOSS:
                 ),
             },
             "optional": {
+                "image": ("IMAGE",),
+                "input_file_path": ("STRING", {"default": "", "multiline": False}),
                 "image_format": (["PNG", "JPEG", "WEBP"], {"default": "PNG"}),
                 "jpeg_quality": (
                     "INT",
@@ -41,17 +42,20 @@ class UploadAliyunOSS:
     RETURN_NAMES = ("image", "file_urls")
     FUNCTION = "upload_image"
     CATEGORY = "image/upload"
-    DESCRIPTION = "Upload image to Aliyun OSS and return the original image"
+    DESCRIPTION = (
+        "Upload image or file to Aliyun OSS and return the original image or file URL"
+    )
     OUTPUT_NODE = True  # 标记为输出节点，避免 "no outputs" 错误
 
     def upload_image(
         self,
-        image,
         access_key_id,
         access_key_secret,
         endpoint,
         bucket_name,
         dest_path,
+        image=None,
+        input_file_path="",
         image_format="PNG",
         jpeg_quality=95,
         output_image=True,
@@ -61,42 +65,130 @@ class UploadAliyunOSS:
         # 参数验证
         if not access_key_id.strip():
             print("❌ AccessKey ID 不能为空")
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": ["AccessKey ID 不能为空"]}}
 
         if not access_key_secret.strip():
             print("❌ AccessKey Secret 不能为空")
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": ["AccessKey Secret 不能为空"]}}
 
         if not bucket_name.strip():
             print("❌ Bucket 名称不能为空")
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": ["Bucket 名称不能为空"]}}
 
         if not dest_path.strip():
             print("❌ 目标路径不能为空")
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": ["目标路径不能为空"]}}
 
+        # 检查是否有输入（图像或文件路径）
+        if image is None and (not input_file_path or not input_file_path.strip()):
+            error_msg = "❌ 请提供图像输入或文件路径"
+            print(error_msg)
+            return {"ui": {"text": [error_msg]}}
+
         try:
-            # 处理图像批次
-            if len(image.shape) == 4:
-                # 批处理多张图片
-                images_to_process = image
-                num_images = images_to_process.shape[0]
-            else:
-                # 单张图片，转换为批次格式
-                images_to_process = image.unsqueeze(0)
-                num_images = 1
+            # 检查输入类型
+            if input_file_path and input_file_path.strip():
+                # 使用文件路径模式
+                if not os.path.exists(input_file_path):
+                    error_msg = f"❌ 文件不存在: {input_file_path}"
+                    print(error_msg)
+                    if output_image and image is not None:
+                        return (image, "")
+                    else:
+                        return {"ui": {"text": [error_msg]}}
+
+                # 读取文件
+                with open(input_file_path, "rb") as f:
+                    upload_data = f.read()
+
+                # 获取文件扩展名
+                file_ext = os.path.splitext(input_file_path)[1].lower()
+
+                # 设置Content-Type
+                content_type_map = {
+                    ".mp4": "video/mp4",
+                    ".avi": "video/x-msvideo",
+                    ".mov": "video/quicktime",
+                    ".mkv": "video/x-matroska",
+                    ".wmv": "video/x-ms-wmv",
+                    ".flv": "video/x-flv",
+                    ".webm": "video/webm",
+                    ".gif": "image/gif",
+                    ".bmp": "image/bmp",
+                    ".tiff": "image/tiff",
+                    ".tga": "image/x-tga",
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".webp": "image/webp",
+                }
+                upload_content_type = content_type_map.get(
+                    file_ext, "application/octet-stream"
+                )
+
+                # 处理目标路径
+                processed_dest_path = self._process_dest_path(dest_path, image_format)
+
+                # 初始化OSS客户端
+                auth = oss2.Auth(access_key_id, access_key_secret)
+                bucket = oss2.Bucket(auth, endpoint, bucket_name)
+
+                # 上传文件
+                result = bucket.put_object(
+                    processed_dest_path,
+                    upload_data,
+                    headers={"Content-Type": upload_content_type},
+                )
+
+                if result.status == 200:
+                    print(f"✅ 文件成功上传到OSS: {processed_dest_path}")
+                    file_url = self._generate_file_url(
+                        endpoint, bucket_name, processed_dest_path
+                    )
+                    file_urls_str = file_url
+                    print(f"📊 文件大小: {len(upload_data)} bytes")
+                else:
+                    print(f"❌ 文件上传失败，状态码: {result.status}")
+                    file_urls_str = ""
+
+                if output_image and image is not None:
+                    return (image, file_urls_str)
+                elif output_image:
+                    # 当output_image为True但没有图像输入时，返回空图像和文件URL
+                    return (None, file_urls_str)
+                else:
+                    return {
+                        "ui": {
+                            "text": [
+                                f"文件上传结果: {processed_dest_path}",
+                                f"文件链接: {file_urls_str}",
+                            ]
+                        }
+                    }
+
+            elif image is not None:
+                # 使用图像模式
+                # 处理图像批次
+                if len(image.shape) == 4:
+                    # 批处理多张图片
+                    images_to_process = image
+                    num_images = images_to_process.shape[0]
+                else:
+                    # 单张图片，转换为批次格式
+                    images_to_process = image.unsqueeze(0)
+                    num_images = 1
 
             # 准备目标路径列表
             dest_paths = self._prepare_dest_paths(dest_path, num_images, image_format)
@@ -232,35 +324,35 @@ class UploadAliyunOSS:
         except oss2.exceptions.AccessDenied:
             error_msg = "❌ 访问被拒绝，请检查 AccessKey 权限"
             print(error_msg)
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
         except oss2.exceptions.NoSuchBucket:
             error_msg = "❌ 存储桶不存在，请检查 bucket_name"
             print(error_msg)
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
         except oss2.exceptions.InvalidAccessKeyId:
             error_msg = "❌ 无效的 AccessKey ID"
             print(error_msg)
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
         except oss2.exceptions.SignatureDoesNotMatch:
             error_msg = "❌ 签名不匹配，请检查 AccessKey Secret"
             print(error_msg)
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
         except oss2.exceptions.OssError as e:
             error_msg = f"❌ OSS错误: {e}"
             print(error_msg)
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
@@ -270,7 +362,7 @@ class UploadAliyunOSS:
             import traceback
 
             traceback.print_exc()
-            if output_image:
+            if output_image and image is not None:
                 return (image, file_urls_str)
             else:
                 return {"ui": {"text": [error_msg]}}
